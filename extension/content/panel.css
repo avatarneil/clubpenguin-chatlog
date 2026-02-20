@@ -1,0 +1,335 @@
+/* ─── CP Chat Log — Club Penguin themed UI ───────────────────────────────── */
+
+/* Font matching newcp.net's style (Burbank / Nunito fallback) */
+@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800&display=swap');
+
+:root {
+  --cp-blue-dark:   #004d8c;
+  --cp-blue-mid:    #0074cc;
+  --cp-blue-light:  #29abf5;
+  --cp-blue-bg:     #0a1628;
+  --cp-yellow:      #ffd84a;
+  --cp-yellow-dark: #e0a800;
+  --cp-white:       #ffffff;
+  --cp-panel-bg:    rgba(0, 20, 50, 0.97);
+  --cp-border:      rgba(41, 171, 245, 0.4);
+  --cp-radius:      12px;
+  --cp-radius-sm:   8px;
+  --cp-shadow:      0 8px 32px rgba(0,0,0,0.6), 0 0 0 2px rgba(41,171,245,0.2);
+  --panel-w:        340px;
+  --panel-h:        520px;
+}
+
+/* ─── Toggle button ─────────────────────────────────────────────────────── */
+
+#cpcl-toggle {
+  position: fixed;
+  bottom:   80px;
+  left:     12px;
+  z-index:  999999;
+  width:    48px;
+  height:   48px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, var(--cp-blue-mid), var(--cp-blue-dark));
+  border:  2px solid var(--cp-blue-light);
+  cursor:  pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.1);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  user-select: none;
+}
+
+#cpcl-toggle:hover {
+  transform:  scale(1.1);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.6), 0 0 8px rgba(41,171,245,0.6);
+}
+
+#cpcl-toggle:active { transform: scale(0.96); }
+
+.cpcl-toggle-icon {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.cpcl-badge {
+  position:   absolute;
+  top:        -4px;
+  right:      -4px;
+  min-width:  18px;
+  height:     18px;
+  padding:    0 4px;
+  background: var(--cp-yellow);
+  color:      var(--cp-blue-dark);
+  font-family: 'Nunito', sans-serif;
+  font-size:   10px;
+  font-weight: 800;
+  border-radius: 999px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+}
+
+/* ─── Main panel ─────────────────────────────────────────────────────────── */
+
+#cpcl-panel {
+  position:   fixed;
+  bottom:     80px;
+  left:       70px;
+  z-index:    999998;
+  width:      var(--panel-w);
+  height:     var(--panel-h);
+  background: var(--cp-panel-bg);
+  border:     1.5px solid var(--cp-border);
+  border-radius: var(--cp-radius);
+  box-shadow: var(--cp-shadow);
+  display:    flex;
+  flex-direction: column;
+  font-family: 'Nunito', 'Segoe UI', sans-serif;
+  color:      var(--cp-white);
+  overflow:   hidden;
+  backdrop-filter: blur(12px);
+
+  /* Hidden by default */
+  opacity:    0;
+  pointer-events: none;
+  transform:  translateY(8px) scale(0.97);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+#cpcl-panel.cpcl-panel-visible {
+  opacity:   1;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+}
+
+/* ─── Header ─────────────────────────────────────────────────────────────── */
+
+.cpcl-header {
+  display:         flex;
+  align-items:     center;
+  justify-content: space-between;
+  padding:         10px 12px 8px;
+  background:      linear-gradient(180deg, var(--cp-blue-dark) 0%, rgba(0,77,140,0.7) 100%);
+  border-bottom:   1px solid var(--cp-border);
+  flex-shrink: 0;
+}
+
+.cpcl-title {
+  font-size:   15px;
+  font-weight: 800;
+  color:       var(--cp-yellow);
+  letter-spacing: 0.3px;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+}
+
+.cpcl-header-controls {
+  display: flex;
+  gap:     4px;
+}
+
+/* ─── Buttons ────────────────────────────────────────────────────────────── */
+
+.cpcl-btn {
+  border:        none;
+  border-radius: var(--cp-radius-sm);
+  font-family:   inherit;
+  font-weight:   700;
+  cursor:        pointer;
+  transition:    background 0.1s, transform 0.1s;
+}
+
+.cpcl-btn:active { transform: scale(0.95); }
+
+.cpcl-btn-sm {
+  padding:   4px 8px;
+  font-size: 11px;
+  background: rgba(255,255,255,0.12);
+  color:     var(--cp-white);
+}
+
+.cpcl-btn-sm:hover { background: rgba(255,255,255,0.22); }
+
+.cpcl-btn-danger { color: #ff8080; }
+.cpcl-btn-danger:hover { background: rgba(255,80,80,0.25); }
+
+/* ─── Filters ────────────────────────────────────────────────────────────── */
+
+.cpcl-filters {
+  display:       flex;
+  flex-wrap:     wrap;
+  gap:           6px;
+  padding:       8px 10px;
+  background:    rgba(0,30,60,0.6);
+  border-bottom: 1px solid var(--cp-border);
+  flex-shrink: 0;
+}
+
+.cpcl-input {
+  background:    rgba(255,255,255,0.08);
+  border:        1px solid rgba(41,171,245,0.3);
+  border-radius: var(--cp-radius-sm);
+  color:         var(--cp-white);
+  font-family:   inherit;
+  font-size:     12px;
+  padding:       5px 8px;
+  outline:       none;
+  transition:    border-color 0.15s;
+}
+
+.cpcl-input:focus {
+  border-color: var(--cp-blue-light);
+  background:   rgba(255,255,255,0.12);
+}
+
+.cpcl-input::placeholder { color: rgba(255,255,255,0.35); }
+
+#cpcl-search  { flex: 1; min-width: 120px; }
+.cpcl-select  { flex: 0 0 auto; max-width: 130px; }
+
+.cpcl-select option { background: var(--cp-blue-bg); }
+
+.cpcl-session-label {
+  display:     flex;
+  align-items: center;
+  gap:         4px;
+  font-size:   11px;
+  color:       rgba(255,255,255,0.6);
+  cursor:      pointer;
+  white-space: nowrap;
+}
+
+/* ─── Message list ───────────────────────────────────────────────────────── */
+
+.cpcl-message-list {
+  flex:        1;
+  overflow-y:  auto;
+  padding:     6px 8px;
+  display:     flex;
+  flex-direction: column;
+  gap:         4px;
+}
+
+/* Custom scrollbar */
+.cpcl-message-list::-webkit-scrollbar       { width: 5px; }
+.cpcl-message-list::-webkit-scrollbar-track { background: transparent; }
+.cpcl-message-list::-webkit-scrollbar-thumb {
+  background:    var(--cp-blue-mid);
+  border-radius: 999px;
+}
+
+.cpcl-empty {
+  color:      rgba(255,255,255,0.35);
+  font-size:  13px;
+  text-align: center;
+  margin:     auto;
+  padding:    24px 16px;
+  line-height: 1.6;
+}
+
+/* ─── Individual message ─────────────────────────────────────────────────── */
+
+.cpcl-msg {
+  background:    rgba(255,255,255,0.05);
+  border:        1px solid rgba(255,255,255,0.06);
+  border-radius: var(--cp-radius-sm);
+  padding:       6px 10px;
+  transition:    background 0.1s;
+  animation:     cpclFadeIn 0.2s ease;
+}
+
+.cpcl-msg:hover { background: rgba(255,255,255,0.09); }
+
+/* Outgoing (own) messages get a subtle yellow tint */
+.cpcl-msg-out {
+  background:   rgba(255,216,74,0.08);
+  border-color: rgba(255,216,74,0.15);
+}
+
+@keyframes cpclFadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+.cpcl-msg-meta {
+  display:     flex;
+  align-items: baseline;
+  gap:         6px;
+  margin-bottom: 2px;
+  flex-wrap:   wrap;
+}
+
+.cpcl-msg-user {
+  font-size:   12px;
+  font-weight: 800;
+  color:       var(--cp-yellow);
+}
+
+.cpcl-msg-room {
+  font-size:  10px;
+  color:      rgba(41,171,245,0.8);
+  font-weight: 600;
+  background: rgba(41,171,245,0.12);
+  padding:    1px 5px;
+  border-radius: 4px;
+}
+
+.cpcl-msg-time {
+  font-size:   10px;
+  color:       rgba(255,255,255,0.35);
+  margin-left: auto;
+}
+
+.cpcl-msg-text {
+  font-size:   13px;
+  font-weight: 600;
+  color:       rgba(255,255,255,0.9);
+  word-break:  break-word;
+  line-height: 1.4;
+}
+
+/* ─── Date separator ─────────────────────────────────────────────────────── */
+
+.cpcl-date-sep {
+  text-align:  center;
+  font-size:   10px;
+  color:       rgba(255,255,255,0.3);
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  padding:     4px 0;
+  position:    relative;
+}
+
+.cpcl-date-sep::before,
+.cpcl-date-sep::after {
+  content:    '';
+  position:   absolute;
+  top:        50%;
+  width:      30%;
+  height:     1px;
+  background: rgba(255,255,255,0.1);
+}
+.cpcl-date-sep::before { left: 0; }
+.cpcl-date-sep::after  { right: 0; }
+
+/* ─── Footer ─────────────────────────────────────────────────────────────── */
+
+.cpcl-footer {
+  display:         flex;
+  justify-content: space-between;
+  align-items:     center;
+  padding:         6px 12px;
+  background:      rgba(0,20,40,0.8);
+  border-top:      1px solid var(--cp-border);
+  font-size:       10px;
+  color:           rgba(255,255,255,0.35);
+  flex-shrink: 0;
+}
+
+.cpcl-session-id {
+  font-family: monospace;
+  font-size:   9px;
+}

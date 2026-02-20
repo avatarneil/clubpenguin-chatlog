@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CP Chat Log</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-header">
+    <span class="popup-logo">🐧</span>
+    <div>
+      <div class="popup-title">CP Chat Log</div>
+      <div class="popup-sub">newcp.net chat history</div>
+    </div>
+  </div>
+
+  <div class="popup-section">
+    <div class="stat-row">
+      <div class="stat-box">
+        <span class="stat-val" id="stat-total">—</span>
+        <span class="stat-lbl">Total messages</span>
+      </div>
+      <div class="stat-box">
+        <span class="stat-val" id="stat-rooms">—</span>
+        <span class="stat-lbl">Rooms seen</span>
+      </div>
+      <div class="stat-box">
+        <span class="stat-val" id="stat-users">—</span>
+        <span class="stat-lbl">Players</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="popup-section">
+    <div class="section-label">Quick search</div>
+    <input type="text" id="popup-search" class="popup-input" placeholder="Search messages…">
+    <div id="popup-results" class="popup-results"></div>
+  </div>
+
+  <div class="popup-section popup-actions">
+    <button class="popup-btn" id="btn-export">⬇ Export .txt</button>
+    <button class="popup-btn popup-btn-danger" id="btn-clear">🗑 Clear All</button>
+  </div>
+
+  <div class="popup-footer">
+    Open the game at <a href="https://newcp.net/play" target="_blank">newcp.net/play</a> to capture chat live.
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

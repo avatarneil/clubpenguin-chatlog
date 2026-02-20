@@ -42,6 +42,74 @@
     'send_tour',      // tour guide speech
   ]);
 
+  /**
+   * Yukon room ID → display name.
+   * Source: https://github.com/wizguin/yukon-server/blob/master/data/rooms.json
+   * IDs >= 2000 are player igloos (offset controlled by iglooIdOffset: 2000).
+   */
+  const ROOM_NAMES = {
+    // Town area
+    100: 'Town',
+    110: 'Coffee Shop',
+    111: 'Book Room',
+    120: 'Dance Club',
+    121: 'Lounge',
+    130: 'Gift Shop',
+    // Ski Village area
+    200: 'Ski Village',
+    210: 'Sport Shop',
+    220: 'Ski Lodge',
+    221: 'Lodge Attic',
+    230: 'Ski Hill',
+    // Plaza area
+    300: 'Plaza',
+    310: 'Pet Shop',
+    320: 'Dojo',
+    321: 'Dojo Courtyard',
+    // Beach area
+    400: 'Beach',
+    // Outdoor / special rooms
+    800: 'Dock',
+    801: 'Snow Forts',
+    802: 'Ice Rink',
+    803: 'EPF HQ',
+    805: 'Iceberg',
+    806: 'Underground Pool',
+    807: 'Lighthouse',
+    809: 'Forest',
+    810: 'Cove',
+    // Mini-game / mission rooms
+    900: 'Astro-Barrier',
+    901: 'Bean Counters',
+    902: 'Cattle Roundup',
+    903: 'Hydro Hopper',
+    904: 'Ice Fishing',
+    907: 'PSA Mission 1',
+    908: 'PSA Mission 2',
+    909: 'Thin Ice',
+    911: 'PSA Mission 3',
+    912: 'Catchin\' Waves',
+    913: 'PSA Mission 4',
+    914: 'PSA Mission 5',
+    915: 'PSA Mission 6',
+    916: 'Puffle Submarine',
+    920: 'PSA Mission 7',
+    921: 'PSA Mission 8',
+    922: 'PSA Mission 9',
+    923: 'PSA Mission 10',
+    927: 'PSA Mission 11',
+    951: 'Sensei Battle',
+    998: 'Card-Jitsu',
+    999: 'Sled Racing',
+  };
+
+  function resolveRoomName(id) {
+    if (id === undefined || id === null) return null;
+    const n = Number(id);
+    if (n >= 2000) return `Igloo #${n - 2000}`;
+    return ROOM_NAMES[n] || `Room #${n}`;
+  }
+
   // ─── Debug buffers (initialised early so WS layer can write to them) ──────
 
   window.__cpChatLog_events    = window.__cpChatLog_events    || [];
@@ -89,7 +157,9 @@
   }
 
   function getCurrentRoom() {
-    return currentRoomId !== null ? String(currentRoomId) : (document.title || '(unknown)');
+    return currentRoomId !== null
+      ? resolveRoomName(currentRoomId)
+      : (document.title || '(unknown)');
   }
 
   function updateRegistryFromMessage(action, args) {
@@ -188,11 +258,12 @@
         || (penguinId !== undefined ? `Penguin #${penguinId}` : '(unknown)');
     }
 
+    const rawRoom = args.room !== undefined ? args.room : args.room_id;
     dispatch({
       timestamp: Date.now(),
       username,
       message:   messageText,
-      room:      args.room || args.room_id || getCurrentRoom() || '(unknown)',
+      room:      rawRoom !== undefined ? resolveRoomName(rawRoom) : (getCurrentRoom() || '(unknown)'),
       eventName: action,
       direction,
       raw:       text.slice(0, 400),

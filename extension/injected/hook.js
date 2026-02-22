@@ -1,23 +1,27 @@
 /**
  * hook.js — runs in PAGE context via "world": "MAIN" content script.
  *
- * Architecture discovery:
- *   newcp.net is a fork of the open-source Yukon CP client. All socket.io
- *   traffic uses a SINGLE event named "message", and the second argument is
- *   an AES-encrypted, base64-encoded ciphertext. Decrypted payloads follow
- *   Yukon's protocol: {"action":"<type>","args":{...}}
+ * Supports multiple Yukon-based CP servers:
+ *
+ *   newcp.net — Encrypted protocol. All socket.io traffic uses a SINGLE event
+ *     named "message"; the payload is AES-encrypted via crypto.subtle.
+ *     Decrypted payloads follow Yukon's: {"action":"<type>","args":{...}}
+ *
+ *   cpjourney.net — Plaintext protocol. Standard socket.io with individual
+ *     event names per action (e.g. socket.emit('send_message', {...})).
+ *     No encryption. Frames are standard engine.io/socket.io wire format:
+ *     42["event_name",{...}]
  *
  * Interception strategy (layered):
  *
- *   Layer 1 — crypto.subtle hook (PRIMARY)
- *     Hook window.crypto.subtle.decrypt to capture plaintext after the game
- *     decrypts each incoming socket message, and hook .encrypt to capture
- *     outgoing plaintext before encryption. Parse the Yukon JSON envelope
- *     and dispatch chat-related actions.
+ *   Layer 1 — crypto.subtle hook (newcp.net PRIMARY)
+ *     Hook window.crypto.subtle.decrypt/encrypt to capture plaintext.
+ *     Only fires on servers that encrypt their socket.io traffic.
  *
- *   Layer 2 — WebSocket proxy (DEBUG + fallback)
- *     Intercepts raw encrypted frames. Used for debug logging and as a
- *     fallback in case the crypto hook misses anything.
+ *   Layer 2 — WebSocket proxy (cpjourney.net PRIMARY, newcp.net DEBUG)
+ *     Intercepts raw WebSocket frames. For plaintext socket.io servers,
+ *     parses the engine.io/socket.io wire format to extract event names
+ *     and arguments. Also provides debug logging for encrypted servers.
  *
  *   Layer 3 — DOM MutationObserver (fallback)
  *     Watches for any Phaser DOMElement chat nodes added to #cp_html.
@@ -29,17 +33,20 @@
   // ─── Constants ────────────────────────────────────────────────────────────
 
   const BRIDGE_EVENT = '__cpChatLog_message__';
+  const IS_CPJOURNEY = /cpjourney\.net$/.test(location.hostname);
 
   /**
-   * Yukon action names that represent chat. Based on the open-source Yukon
-   * client's handler map + newcp.net-specific additions.
+   * Yukon action names that represent chat. Covers both newcp.net and
+   * cpjourney.net action names (they diverge slightly).
    */
   const CHAT_ACTIONS = new Set([
-    'send_message',   // free-text chat
-    'send_safe',      // safe-message (ID-based, we show the text if resolvable)
-    'send_emote',     // emote action
-    'send_joke',      // joke
-    'send_tour',      // tour guide speech
+    'send_message',   // free-text chat          (all servers)
+    'send_safe',      // safe-message (ID-based)  (all servers)
+    'send_emote',     // emote action             (all servers)
+    'send_joke',      // joke                     (newcp.net)
+    'send_tour',      // tour guide speech        (newcp.net)
+    'give_tour',      // tour guide speech        (cpjourney.net)
+    'send_stage',     // stage performance        (cpjourney.net)
   ]);
 
   /**
@@ -126,9 +133,11 @@
     try { return JSON.parse(str); } catch { return null; }
   }
 
+  const _textDecoder = new TextDecoder();
+
   function bufferToString(buf) {
     if (typeof buf === 'string') return buf;
-    try { return new TextDecoder().decode(buf); } catch { return null; }
+    try { return _textDecoder.decode(buf); } catch { return null; }
   }
 
   // ─── Player registry & room tracking ────────────────────────────────────
@@ -203,7 +212,8 @@
   }
 
   // ─── Yukon message handler ────────────────────────────────────────────────
-  // Called with the plaintext string after decryption (or before encryption).
+  // Called either with a JSON text string (newcp.net encrypted protocol) or
+  // with a pre-parsed action + args object (cpjourney.net plaintext protocol).
 
   function handleYukonMessage(text, direction) {
     // Store for debug
@@ -213,9 +223,11 @@
     const parsed = tryJSON(text);
     if (!parsed || typeof parsed.action !== 'string') return;
 
-    const action = parsed.action;
-    const args   = parsed.args || {};
+    handleYukonAction(parsed.action, parsed.args || {}, direction, text);
+  }
 
+  /** Entry point for pre-parsed messages (used by the socket.io frame parser). */
+  function handleYukonAction(action, args, direction, rawText) {
     // Track all actions for debug
     window.__cpChatLog_events.push({ ts: Date.now(), event: action, direction });
     if (window.__cpChatLog_events.length > 500) window.__cpChatLog_events.shift();
@@ -238,8 +250,10 @@
       messageText = `[Emote ${args.emote ?? '?'}]`;
     } else if (action === 'send_joke') {
       messageText = `[Joke #${args.joke ?? '?'}]`;
-    } else if (action === 'send_tour') {
+    } else if (action === 'send_tour' || action === 'give_tour') {
       messageText = args.message ? String(args.message) : `[Tour]`;
+    } else if (action === 'send_stage') {
+      messageText = args.message ? String(args.message) : `[Stage]`;
     }
 
     if (!messageText) return;
@@ -259,6 +273,7 @@
     }
 
     const rawRoom = args.room !== undefined ? args.room : args.room_id;
+    const raw = rawText || JSON.stringify({ action, args }).slice(0, 400);
     dispatch({
       timestamp: Date.now(),
       username,
@@ -266,8 +281,150 @@
       room:      rawRoom !== undefined ? resolveRoomName(rawRoom) : (getCurrentRoom() || '(unknown)'),
       eventName: action,
       direction,
-      raw:       text.slice(0, 400),
+      raw:       raw.slice(0, 400),
     });
+  }
+
+  // ─── Socket.io frame parsers ──────────────────────────────────────────────
+
+  /**
+   * Parse a plaintext socket.io v3/v4 text frame.
+   * Format: 42["event_name",{...}]  (engine.io message + socket.io EVENT)
+   */
+  function parseSocketIOTextFrame(frame) {
+    if (typeof frame !== 'string' || frame.length < 3) return null;
+    if (frame[0] !== '4' || frame[1] !== '2') return null;
+
+    let jsonStart = 2;
+    if (frame[2] === '/') {
+      const commaIdx = frame.indexOf(',', 2);
+      if (commaIdx === -1) return null;
+      jsonStart = commaIdx + 1;
+    }
+
+    const arr = tryJSON(frame.slice(jsonStart));
+    if (!Array.isArray(arr) || arr.length < 1 || typeof arr[0] !== 'string') return null;
+
+    return { eventName: arr[0], payload: arr[1] || {} };
+  }
+
+  // ─── Minimal msgpack decoder ────────────────────────────────────────────────
+  // Covers the subset used by socket.io-msgpack-parser: maps, arrays, strings,
+  // integers, booleans, null, and bin/ext (skipped). Float64 for completeness.
+
+  function decodeMsgpack(buf) {
+    const ab    = buf instanceof ArrayBuffer ? buf : buf.buffer;
+    const view  = new DataView(ab);
+    const bytes = new Uint8Array(ab);
+    const len   = bytes.length;
+    let pos = 0;
+    let depth = 0;
+    const MAX_DEPTH = 10;        // prevent stack overflow on nested data
+    const MAX_COLLECTION = 1000; // cap array/map entries to avoid OOM
+
+    function check(n) { if (pos + n > len) throw 0; }
+
+    function u8()  { check(1); return view.getUint8(pos++); }
+    function u16() { check(2); const v = view.getUint16(pos); pos += 2; return v; }
+    function u32() { check(4); const v = view.getUint32(pos); pos += 4; return v; }
+    function i8()  { check(1); return view.getInt8(pos++); }
+    function i16() { check(2); const v = view.getInt16(pos); pos += 2; return v; }
+    function i32() { check(4); const v = view.getInt32(pos); pos += 4; return v; }
+
+    function str(n) {
+      check(n);
+      const s = _textDecoder.decode(bytes.subarray(pos, pos + n));
+      pos += n;
+      return s;
+    }
+    function skip(n) { check(n); pos += n; return null; }
+
+    function readMap(n) {
+      if (n > MAX_COLLECTION || ++depth > MAX_DEPTH) throw 0;
+      const obj = {};
+      for (let i = 0; i < n; i++) { const k = read(); obj[k] = read(); }
+      depth--;
+      return obj;
+    }
+    function readArr(n) {
+      if (n > MAX_COLLECTION || ++depth > MAX_DEPTH) throw 0;
+      const arr = [];
+      for (let i = 0; i < n; i++) arr.push(read());
+      depth--;
+      return arr;
+    }
+
+    function read() {
+      check(1);
+      const b = u8();
+
+      // positive fixint  0x00–0x7f
+      if (b <= 0x7f) return b;
+      // fixmap  0x80–0x8f
+      if ((b & 0xf0) === 0x80) return readMap(b & 0x0f);
+      // fixarray  0x90–0x9f
+      if ((b & 0xf0) === 0x90) return readArr(b & 0x0f);
+      // fixstr  0xa0–0xbf
+      if ((b & 0xe0) === 0xa0) return str(b & 0x1f);
+      // negative fixint  0xe0–0xff
+      if (b >= 0xe0) return b - 256;
+
+      switch (b) {
+        case 0xc0: return null;          // nil
+        case 0xc2: return false;         // false
+        case 0xc3: return true;          // true
+        case 0xc4: return skip(u8());    // bin8
+        case 0xc5: return skip(u16());   // bin16
+        case 0xc6: return skip(u32());   // bin32
+        case 0xc7: return skip(u8() + 1);  // ext8
+        case 0xc8: return skip(u16() + 1); // ext16
+        case 0xc9: return skip(u32() + 1); // ext32
+        case 0xca: { check(4); const v = view.getFloat32(pos); pos += 4; return v; }
+        case 0xcb: { check(8); const v = view.getFloat64(pos); pos += 8; return v; }
+        case 0xcc: return u8();          // uint8
+        case 0xcd: return u16();         // uint16
+        case 0xce: return u32();         // uint32
+        case 0xcf: { check(8); const hi = u32(), lo = u32(); return hi * 0x100000000 + lo; }
+        case 0xd0: return i8();          // int8
+        case 0xd1: return i16();         // int16
+        case 0xd2: return i32();         // int32
+        case 0xd3: { check(8); pos += 8; return 0; } // int64 — skip, not needed
+        case 0xd4: return skip(2);       // fixext1
+        case 0xd5: return skip(3);       // fixext2
+        case 0xd6: return skip(5);       // fixext4
+        case 0xd7: return skip(9);       // fixext8
+        case 0xd8: return skip(17);      // fixext16
+        case 0xd9: return str(u8());     // str8
+        case 0xda: return str(u16());    // str16
+        case 0xdb: return str(u32());    // str32
+        case 0xdc: return readArr(u16()); // array16
+        case 0xdd: return readArr(u32()); // array32
+        case 0xde: return readMap(u16()); // map16
+        case 0xdf: return readMap(u32()); // map32
+        default:   return null;
+      }
+    }
+
+    try { return read(); } catch { return null; }
+  }
+
+  /**
+   * Parse a msgpack-encoded socket.io packet (cpjourney.net).
+   * Expected structure: { type: 2, data: ["message", {action, args}], nsp: "/" }
+   * Returns the inner Yukon {action, args} or null.
+   */
+  function parseMsgpackSocketIOFrame(buf) {
+    const packet = decodeMsgpack(buf);
+    if (!packet || typeof packet !== 'object') return null;
+    // socket.io EVENT type = 2
+    if (packet.type !== 2) return null;
+    const data = packet.data;
+    if (!Array.isArray(data) || data.length < 2) return null;
+    // data[0] is the event name, data[1] is the payload
+    const eventName = data[0];
+    const payload   = data[1];
+    if (typeof eventName !== 'string' || !payload || typeof payload !== 'object') return null;
+    return { eventName, payload };
   }
 
   // ─── Layer 1: crypto.subtle hook ──────────────────────────────────────────
@@ -276,6 +433,12 @@
   // clean plaintext regardless of the encryption scheme used.
 
   (function patchCrypto() {
+    // cpjourney.net does NOT use crypto — skip to avoid triggering bot protection
+    if (location.hostname === 'play.cpjourney.net' || location.hostname === 'cpjourney.net') {
+      console.debug('[CP Chat Log] crypto.subtle hook skipped (not needed on cpjourney)');
+      return;
+    }
+
     if (!window.crypto || !window.crypto.subtle) {
       console.warn('[CP Chat Log] crypto.subtle not available — crypto hook skipped');
       return;
@@ -307,75 +470,215 @@
     console.debug('[CP Chat Log] crypto.subtle hook installed');
   })();
 
-  // ─── Layer 2: WebSocket proxy (debug logging + encrypted-frame fallback) ──
+  // ─── Layer 2a: WebSocket prototype hooks (newcp.net ONLY) ────────────────
+  // Modifies WebSocket.prototype — fine on newcp.net which has no hCaptcha,
+  // but would trigger bot-detection on cpjourney.net, so we skip it there.
 
   (function patchWebSocket() {
-    const _WS = window.WebSocket;
-    if (!_WS) return;
+    if (IS_CPJOURNEY) return; // cpjourney uses Layer 2b instead
 
-    function NCPWebSocket(url, protocols) {
-      const ws = protocols ? new _WS(url, protocols) : new _WS(url);
+    const WSProto = WebSocket.prototype;
+    if (!WSProto) return;
 
-      const _origAddEL = ws.addEventListener.bind(ws);
-      ws.addEventListener = function (type, listener, ...rest) {
-        if (type === 'message') {
-          const wrapped = function (evt) {
-            const raw = evt.data;
-            window.__cpChatLog_rawFrames.push({
-              dir:  'in',
-              data: typeof raw === 'string' ? raw.slice(0, 300) : `[binary ${raw.byteLength ?? '?'} bytes]`,
-            });
-            if (window.__cpChatLog_rawFrames.length > 200) window.__cpChatLog_rawFrames.shift();
-            return listener.call(this, evt);
-          };
-          return _origAddEL(type, wrapped, ...rest);
+    function handleRawFrame(data, direction) {
+      if (typeof data === 'string') {
+        const parsed = parseSocketIOTextFrame(data);
+        if (parsed) {
+          processSocketIOEvent(parsed.eventName, parsed.payload, direction, data);
         }
-        return _origAddEL(type, listener, ...rest);
-      };
+      }
+    }
 
-      const _origSend = ws.send.bind(ws);
-      ws.send = function (data) {
-        window.__cpChatLog_rawFrames.push({
-          dir:  'out',
-          data: typeof data === 'string' ? data.slice(0, 300) : `[binary ${data.byteLength ?? '?'} bytes]`,
-        });
-        if (window.__cpChatLog_rawFrames.length > 200) window.__cpChatLog_rawFrames.shift();
-        return _origSend(data);
-      };
+    function processSocketIOEvent(eventName, payload, direction, rawText) {
+      if (eventName === 'message' && payload && typeof payload.action === 'string') {
+        handleYukonAction(payload.action, payload.args || {}, direction, rawText);
+      } else {
+        handleYukonAction(eventName, payload || {}, direction, rawText);
+      }
+    }
 
-      const _nativeOnmessageDesc = Object.getOwnPropertyDescriptor(_WS.prototype, 'onmessage');
-      let _onmessageStored = null;
-      Object.defineProperty(ws, 'onmessage', {
-        get: () => _onmessageStored,
-        set: (fn) => {
-          _onmessageStored = fn;
-          if (_nativeOnmessageDesc && _nativeOnmessageDesc.set) {
-            _nativeOnmessageDesc.set.call(ws, function (evt) {
-              window.__cpChatLog_rawFrames.push({ dir: 'in', data: String(evt.data).slice(0, 300) });
-              if (window.__cpChatLog_rawFrames.length > 200) window.__cpChatLog_rawFrames.shift();
-              return fn && fn.call(this, evt);
-            });
+    const _origSend = WSProto.send;
+    WSProto.send = function (data) {
+      try { handleRawFrame(data, 'out'); } catch { /* ignore */ }
+      return _origSend.call(this, data);
+    };
+
+    const _origAddEL = WSProto.addEventListener;
+    WSProto.addEventListener = function (type, listener, ...rest) {
+      if (type === 'message' && typeof listener === 'function') {
+        const wrapped = function (evt) {
+          try { handleRawFrame(evt.data, 'in'); } catch { /* ignore */ }
+          return listener.call(this, evt);
+        };
+        return _origAddEL.call(this, type, wrapped, ...rest);
+      }
+      return _origAddEL.call(this, type, listener, ...rest);
+    };
+
+    const _onmsgDesc = Object.getOwnPropertyDescriptor(WSProto, 'onmessage');
+    if (_onmsgDesc && _onmsgDesc.set) {
+      const _origSet = _onmsgDesc.set;
+      const _origGet = _onmsgDesc.get;
+      Object.defineProperty(WSProto, 'onmessage', {
+        get: _origGet,
+        set: function (fn) {
+          if (typeof fn === 'function') {
+            const wrapped = function (evt) {
+              try { handleRawFrame(evt.data, 'in'); } catch { /* ignore */ }
+              return fn.call(this, evt);
+            };
+            _origSet.call(this, wrapped);
+          } else {
+            _origSet.call(this, fn);
           }
         },
         configurable: true,
+        enumerable: _onmsgDesc.enumerable,
       });
-
-      return ws;
     }
 
-    Object.setPrototypeOf(NCPWebSocket, _WS);
-    NCPWebSocket.prototype = _WS.prototype;
-    Object.getOwnPropertyNames(_WS).forEach((k) => {
-      try { NCPWebSocket[k] = _WS[k]; } catch { /* read-only */ }
-    });
-
-    window.WebSocket = NCPWebSocket;
-    console.debug('[CP Chat Log] WebSocket proxy installed');
+    console.debug('[CP Chat Log] WebSocket prototype hooks installed (newcp mode)');
   })();
 
-  // ─── Layer 3: DOM MutationObserver ────────────────────────────────────────
+  // ─── Layer 2b: stealth EventTarget hook (cpjourney.net ONLY) ─────────────
+  // hCaptcha on cpjourney detects modifications to WebSocket.prototype.
+  // Instead, we hook EventTarget.prototype.addEventListener (a generic API
+  // that many libraries legitimately modify — unlikely to be fingerprinted)
+  // and use Function.prototype.toString masking to make our patches invisible.
+  // When socket.io adds its 'message' listener to a WebSocket instance, we
+  // detect it and piggyback our own listener + send wrapper on that instance.
+
+  (function interceptViaEventTarget() {
+    if (!IS_CPJOURNEY) return;
+
+    // ── toString masking: make patched functions report [native code] ──
+    const _fnToStr   = Function.prototype.toString;
+    const _masked    = new WeakMap();
+
+    Function.prototype.toString = function () {
+      const native = _masked.get(this);
+      return native !== undefined ? native : _fnToStr.call(this);
+    };
+    _masked.set(Function.prototype.toString, _fnToStr.call(_fnToStr));
+
+    // ── Msgpack decode queue (reused from earlier definition) ──
+    const _msgpackQueue     = [];
+    let   _msgpackScheduled = false;
+
+    function drainMsgpackQueue() {
+      _msgpackScheduled = false;
+      const batch = _msgpackQueue.splice(0, _msgpackQueue.length);
+      for (const { buf, direction } of batch) {
+        try {
+          const parsed = parseMsgpackSocketIOFrame(buf);
+          if (parsed) processEvent(parsed.eventName, parsed.payload, direction);
+        } catch { /* not parseable */ }
+      }
+    }
+
+    function processEvent(eventName, payload, direction, rawText) {
+      if (eventName === 'message' && payload && typeof payload.action === 'string') {
+        handleYukonAction(payload.action, payload.args || {}, direction, rawText);
+      } else {
+        handleYukonAction(eventName, payload || {}, direction, rawText);
+      }
+    }
+
+    function handleRawFrame(data, direction) {
+      // Text frames (standard socket.io JSON)
+      if (typeof data === 'string') {
+        const parsed = parseSocketIOTextFrame(data);
+        if (parsed) processEvent(parsed.eventName, parsed.payload, direction, data);
+        return;
+      }
+      // Binary frames (msgpack-encoded socket.io) — queue for async decode
+      try {
+        const buf = data instanceof ArrayBuffer ? data
+                  : data.buffer instanceof ArrayBuffer ? data.buffer
+                  : null;
+        if (!buf || buf.byteLength > 8192) return;
+        _msgpackQueue.push({ buf: buf.slice(0), direction });
+        if (!_msgpackScheduled) {
+          _msgpackScheduled = true;
+          setTimeout(drainMsgpackQueue, 0);
+        }
+      } catch { /* ignore */ }
+    }
+
+    // ── Helper: hook a WebSocket instance the first time we see it ──
+    function hookWSInstance(ws) {
+      if (ws.__cpclHooked) return;
+      ws.__cpclHooked = true;
+      console.debug('[CP Chat Log] WebSocket instance detected — attaching listeners');
+
+      // Wrap send() on this specific instance (WebSocket.prototype.send untouched)
+      const _instanceSend = ws.send.bind(ws);
+      ws.send = function (data) {
+        try { handleRawFrame(data, 'out'); } catch { /* ignore */ }
+        return _instanceSend(data);
+      };
+    }
+
+    // ── Hook 1: EventTarget.prototype.addEventListener ──
+    // Catches socket.io versions that use addEventListener('message', fn).
+    const _origAEL = EventTarget.prototype.addEventListener;
+    EventTarget.prototype.addEventListener = function (type, listener, options) {
+      if (type === 'message' && this instanceof WebSocket) {
+        hookWSInstance(this);
+        // Also wrap this listener to capture incoming frames
+        if (typeof listener === 'function') {
+          const origListener = listener;
+          listener = function (evt) {
+            try { handleRawFrame(evt.data, 'in'); } catch { /* ignore */ }
+            return origListener.call(this, evt);
+          };
+        }
+      }
+      return _origAEL.call(this, type, listener, options);
+    };
+    _masked.set(EventTarget.prototype.addEventListener, _fnToStr.call(_origAEL));
+
+    // ── Hook 2: WebSocket.prototype onmessage setter ──
+    // engine.io-client v6 uses `ws.onmessage = fn` (not addEventListener).
+    // We intercept the setter to wrap the handler and hook the instance.
+    const _onmsgDesc = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'onmessage');
+    if (_onmsgDesc && _onmsgDesc.set) {
+      const _origSet = _onmsgDesc.set;
+      const _origGet = _onmsgDesc.get;
+
+      const maskedSet = function (fn) {
+        if (this instanceof WebSocket) {
+          hookWSInstance(this);
+        }
+        if (typeof fn === 'function') {
+          const origFn = fn;
+          const wrapped = function (evt) {
+            try { handleRawFrame(evt.data, 'in'); } catch { /* ignore */ }
+            return origFn.call(this, evt);
+          };
+          return _origSet.call(this, wrapped);
+        }
+        return _origSet.call(this, fn);
+      };
+
+      Object.defineProperty(WebSocket.prototype, 'onmessage', {
+        get: _origGet,
+        set: maskedSet,
+        configurable: true,
+        enumerable: _onmsgDesc.enumerable,
+      });
+      _masked.set(maskedSet, _fnToStr.call(_origSet));
+    }
+
+    console.debug('[CP Chat Log] stealth hooks installed (cpjourney mode)');
+  })();
+
+  // ─── Layer 3: DOM MutationObserver (newcp.net only) ─────────────────────
+  // cpjourney renders chat in Phaser canvas, not DOM, so this is useless there.
 
   (function observeDOM() {
+    if (IS_CPJOURNEY) return;
+
     const CHAT_SELECTORS = [
       '.chat-message', '.chatMessage', '.chat_message',
       '.message-text', '.messageText',
@@ -429,9 +732,7 @@
     const decrypted = window.__cpChatLog_decrypted  || [];
 
     console.group('[CP Chat Log] Debug snapshot');
-    console.log('crypto.subtle hooked:', typeof window.crypto?.subtle?.decrypt === 'function'
-      && window.crypto.subtle.decrypt.toString().includes('_origDecrypt') === false
-      ? '✅ (async wrapper active)' : '⚠️ check manually');
+    console.log(`Mode: ${IS_CPJOURNEY ? 'cpjourney (socket.io intercept)' : 'newcp (crypto + WS hooks)'}`);
     console.log(`Own identity: id=${ownPlayerId} username=${ownUsername}`);
     console.log(`Current room: ${currentRoomId}`);
     console.log(`Player registry size: ${playerRegistry.size}`);
@@ -454,5 +755,5 @@
     return { events, frames, decrypted, playerRegistry, ownPlayerId, ownUsername, currentRoomId };
   };
 
-  console.debug('[CP Chat Log] Hook loaded. Layers: crypto.subtle ✓  WebSocket ✓  DOM ✓');
+  console.debug(`[CP Chat Log] Hook loaded (${IS_CPJOURNEY ? 'cpjourney' : 'newcp'} mode)`);
 })();

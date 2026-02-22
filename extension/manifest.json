@@ -2,24 +2,26 @@
   "manifest_version": 3,
   "name": "CP Chat Log",
   "version": "1.0.0",
-  "description": "Captures and persists chat history for New Club Penguin (newcp.net) across sessions.",
+  "description": "Captures and persists chat history for Yukon-based Club Penguin servers (newcp.net, cpjourney.net) across sessions.",
   "permissions": [
     "storage"
   ],
   "host_permissions": [
     "*://newcp.net/*",
-    "*://media8.newcp.net/*"
+    "*://media8.newcp.net/*",
+    "*://cpjourney.net/*",
+    "*://play.cpjourney.net/*"
   ],
   "content_scripts": [
     {
-      "matches": ["*://newcp.net/play*"],
+      "matches": ["*://newcp.net/play*", "*://play.cpjourney.net/*"],
       "js": ["injected/hook.js"],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": false
     },
     {
-      "matches": ["*://newcp.net/play*"],
+      "matches": ["*://newcp.net/play*", "*://play.cpjourney.net/*"],
       "js": ["content/panel.js"],
       "css": ["content/panel.css"],
       "run_at": "document_idle",
@@ -45,7 +47,7 @@
   "web_accessible_resources": [
     {
       "resources": ["injected/hook.js"],
-      "matches": ["*://newcp.net/*"]
+      "matches": ["*://newcp.net/*", "*://play.cpjourney.net/*"]
     }
   ]
 }

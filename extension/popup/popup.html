@@ -11,7 +11,7 @@
     <span class="popup-logo">🐧</span>
     <div>
       <div class="popup-title">CP Chat Log</div>
-      <div class="popup-sub">newcp.net chat history</div>
+      <div class="popup-sub">Chat history across CP servers</div>
     </div>
   </div>
 
@@ -39,12 +39,17 @@
   </div>
 
   <div class="popup-section popup-actions">
-    <button class="popup-btn" id="btn-export">⬇ Export .txt</button>
+    <select id="export-format" class="popup-input" style="flex:0 0 auto; width: auto; padding: 6px 8px;">
+      <option value="txt">.txt</option>
+      <option value="json">.json</option>
+      <option value="csv">.csv</option>
+    </select>
+    <button class="popup-btn" id="btn-export">⬇ Export</button>
     <button class="popup-btn popup-btn-danger" id="btn-clear">🗑 Clear All</button>
   </div>
 
   <div class="popup-footer">
-    Open the game at <a href="https://newcp.net/play" target="_blank">newcp.net/play</a> to capture chat live.
+    Open the game at <a href="https://newcp.net/play" target="_blank">newcp.net/play</a> or <a href="https://play.cpjourney.net" target="_blank">play.cpjourney.net</a> to capture chat live.
   </div>
 
   <script src="popup.js"></script>

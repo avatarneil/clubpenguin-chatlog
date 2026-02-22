@@ -33,7 +33,30 @@
   // ─── Constants ────────────────────────────────────────────────────────────
 
   const BRIDGE_EVENT = '__cpChatLog_message__';
+  const PLAYER_EVENT = '__cpChatLog_playerEvent__';
   const IS_CPJOURNEY = /cpjourney\.net$/.test(location.hostname);
+
+  const EMOTE_NAMES = {
+    1: 'Happy', 2: 'Sad', 3: 'Grumpy', 4: 'Sick', 5: 'Surprised',
+    6: 'Silly', 7: 'Love', 8: 'Thinking', 9: 'Angry', 10: 'Laughing',
+    11: 'Winking', 12: 'Flower', 13: 'Coffee', 14: 'Pizza', 15: 'Coin',
+    16: 'Igloo', 17: 'Cake', 18: 'Snowflake', 19: 'Sun', 20: 'Moon',
+    21: 'Star', 22: 'Heart', 23: 'Skull', 24: 'Clover', 25: 'Diamond',
+    26: 'Game', 27: 'Music', 28: 'Light Bulb', 29: 'Ghost', 30: 'Pumpkin',
+  };
+
+  const JOKE_TEXTS = {
+    1: 'What do you call a sleeping dinosaur? A dino-snore!',
+    2: 'Why did the cookie go to the doctor? It felt crummy!',
+    3: 'What do you call a fish without eyes? A fsh!',
+    4: 'Why couldn\'t the bicycle stand up? It was two-tired!',
+    5: 'What do you get when you cross a snowman with a vampire? Frostbite!',
+    6: 'Why did the penguin cross the road? To go to the other slide!',
+    7: 'What do penguins eat for lunch? Ice-burgers!',
+    8: 'What\'s a penguin\'s favorite relative? Aunt Arctica!',
+    9: 'Why don\'t penguins fly? They can\'t afford plane tickets!',
+    10: 'What do penguins sing on a birthday? Freeze a jolly good fellow!',
+  };
 
   /**
    * Yukon action names that represent chat. Covers both newcp.net and
@@ -123,6 +146,21 @@
   window.__cpChatLog_rawFrames = window.__cpChatLog_rawFrames || [];
   window.__cpChatLog_decrypted = window.__cpChatLog_decrypted || [];
 
+  // ─── Persistent friend/ignore lists (localStorage-backed) ───────────────
+
+  const STORAGE_KEY_FRIENDS = '__cpChatLog_friends__';
+  const STORAGE_KEY_IGNORED = '__cpChatLog_ignored__';
+
+  function loadSet(key) {
+    try { return new Set(JSON.parse(localStorage.getItem(key) || '[]')); } catch { return new Set(); }
+  }
+  function saveSet(key, set) {
+    try { localStorage.setItem(key, JSON.stringify([...set])); } catch { /* ignore */ }
+  }
+
+  const friendList = loadSet(STORAGE_KEY_FRIENDS);
+  const ignoreList = loadSet(STORAGE_KEY_IGNORED);
+
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
   function dispatch(msg) {
@@ -153,9 +191,14 @@
 
   function registerPlayer(p) {
     if (!p || p.id === undefined) return;
-    playerRegistry.set(Number(p.id), {
-      username: p.username || p.nickname || `Penguin #${p.id}`,
-      nickname: p.nickname || p.username || `Penguin #${p.id}`,
+    const id = Number(p.id);
+    const existing = playerRegistry.get(id);
+    playerRegistry.set(id, {
+      username:     p.username || p.nickname || (existing && existing.username) || `Penguin #${p.id}`,
+      nickname:     p.nickname || p.username || (existing && existing.nickname) || `Penguin #${p.id}`,
+      lastSeen:     (existing && existing.lastSeen) || Date.now(),
+      roomsVisited: (existing && existing.roomsVisited) || new Set(),
+      messageCount: (existing && existing.messageCount) || 0,
     });
   }
 
@@ -172,6 +215,8 @@
   }
 
   function updateRegistryFromMessage(action, args) {
+    const now = Date.now();
+
     switch (action) {
       case 'login':
       case 'token_login':
@@ -183,13 +228,22 @@
           ownPlayerId = Number(u.id);
           ownUsername = u.username || u.nickname || null;
           registerPlayer(u);
+          const entry = playerRegistry.get(Number(u.id));
+          if (entry) entry.lastSeen = now;
         }
         break;
       }
       case 'join_room': {
         if (args.room !== undefined) currentRoomId = args.room;
         if (Array.isArray(args.users)) {
-          args.users.forEach(registerPlayer);
+          args.users.forEach(u => {
+            registerPlayer(u);
+            const entry = playerRegistry.get(Number(u.id));
+            if (entry) {
+              entry.lastSeen = now;
+              if (currentRoomId !== null) entry.roomsVisited.add(currentRoomId);
+            }
+          });
           // If we haven't resolved our own identity yet, the first (or only)
           // entry whose id matches what the server echoes back is usually us.
           // This is a last-resort heuristic only.
@@ -201,13 +255,33 @@
         break;
       }
       case 'add_player': {
-        registerPlayer(args.user || args);
+        const u = args.user || args;
+        registerPlayer(u);
+        if (u && u.id !== undefined) {
+          const entry = playerRegistry.get(Number(u.id));
+          if (entry) {
+            entry.lastSeen = now;
+            if (currentRoomId !== null) entry.roomsVisited.add(currentRoomId);
+          }
+        }
         break;
       }
       case 'remove_player': {
-        if (args.user !== undefined) playerRegistry.delete(Number(args.user));
+        // Update lastSeen before removing, but keep the entry for tracking
+        if (args.user !== undefined) {
+          const entry = playerRegistry.get(Number(args.user));
+          if (entry) entry.lastSeen = now;
+          playerRegistry.delete(Number(args.user));
+        }
         break;
       }
+    }
+
+    // Update lastSeen for any action involving a known player ID
+    const actionPlayerId = args.id !== undefined ? args.id : args.penguin_id;
+    if (actionPlayerId !== undefined) {
+      const entry = playerRegistry.get(Number(actionPlayerId));
+      if (entry) entry.lastSeen = now;
     }
   }
 
@@ -235,6 +309,43 @@
     // Update player registry / room state from every message (not just chat)
     updateRegistryFromMessage(action, args);
 
+    // Dispatch player events for join/add/remove actions
+    if (action === 'join_room' || action === 'add_player' || action === 'remove_player') {
+      if (action === 'join_room' && Array.isArray(args.users)) {
+        // Dispatch one event per player in the room
+        args.users.forEach(u => {
+          if (u && u.id !== undefined) {
+            window.dispatchEvent(new CustomEvent(PLAYER_EVENT, { detail: {
+              type: 'join',
+              player: { id: Number(u.id), username: u.username || u.nickname || `Penguin #${u.id}`, nickname: u.nickname || u.username || `Penguin #${u.id}` },
+              room: currentRoomId,
+              timestamp: Date.now(),
+            }}));
+          }
+        });
+      } else if (action === 'add_player') {
+        const u = args.user || args;
+        if (u && u.id !== undefined) {
+          window.dispatchEvent(new CustomEvent(PLAYER_EVENT, { detail: {
+            type: 'add',
+            player: { id: Number(u.id), username: u.username || u.nickname || `Penguin #${u.id}`, nickname: u.nickname || u.username || `Penguin #${u.id}` },
+            room: currentRoomId,
+            timestamp: Date.now(),
+          }}));
+        }
+      } else if (action === 'remove_player') {
+        if (args.user !== undefined) {
+          // Player was already removed from registry, so build minimal data
+          window.dispatchEvent(new CustomEvent(PLAYER_EVENT, { detail: {
+            type: 'remove',
+            player: { id: Number(args.user), username: lookupUsername(args.user) || `Penguin #${args.user}`, nickname: null },
+            room: currentRoomId,
+            timestamp: Date.now(),
+          }}));
+        }
+      }
+    }
+
     if (!CHAT_ACTIONS.has(action)) return;
 
     // ── Resolve message text ──
@@ -247,9 +358,15 @@
         ? String(args.message)
         : (args.safe !== undefined ? `[Safe #${args.safe}]` : null);
     } else if (action === 'send_emote') {
-      messageText = `[Emote ${args.emote ?? '?'}]`;
+      const emoteId = args.emote;
+      messageText = emoteId !== undefined && EMOTE_NAMES[emoteId]
+        ? `[Emote: ${EMOTE_NAMES[emoteId]}]`
+        : `[Emote #${emoteId ?? '?'}]`;
     } else if (action === 'send_joke') {
-      messageText = `[Joke #${args.joke ?? '?'}]`;
+      const jokeId = args.joke;
+      messageText = jokeId !== undefined && JOKE_TEXTS[jokeId]
+        ? JOKE_TEXTS[jokeId]
+        : `[Joke #${jokeId ?? '?'}]`;
     } else if (action === 'send_tour' || action === 'give_tour') {
       messageText = args.message ? String(args.message) : `[Tour]`;
     } else if (action === 'send_stage') {
@@ -272,6 +389,13 @@
         || (penguinId !== undefined ? `Penguin #${penguinId}` : '(unknown)');
     }
 
+    // Increment messageCount for the sender
+    const senderId = penguinId !== undefined ? Number(penguinId) : ownPlayerId;
+    if (senderId !== null && senderId !== undefined) {
+      const senderEntry = playerRegistry.get(Number(senderId));
+      if (senderEntry) senderEntry.messageCount = (senderEntry.messageCount || 0) + 1;
+    }
+
     const rawRoom = args.room !== undefined ? args.room : args.room_id;
     const raw = rawText || JSON.stringify({ action, args }).slice(0, 400);
     dispatch({
@@ -282,6 +406,9 @@
       eventName: action,
       direction,
       raw:       raw.slice(0, 400),
+      playerId:  senderId !== null && senderId !== undefined ? Number(senderId) : null,
+      isIgnored: ignoreList.has(username),
+      isFriend:  friendList.has(username),
     });
   }
 
@@ -723,6 +850,14 @@
       ? document.addEventListener('DOMContentLoaded', start)
       : start();
   })();
+
+  // ─── Expose data for panel.js ────────────────────────────────────────────
+
+  window.__cpChatLog_friends       = friendList;
+  window.__cpChatLog_ignored       = ignoreList;
+  window.__cpChatLog_saveFriends   = () => saveSet(STORAGE_KEY_FRIENDS, friendList);
+  window.__cpChatLog_saveIgnored   = () => saveSet(STORAGE_KEY_IGNORED, ignoreList);
+  window.__cpChatLog_playerRegistry = playerRegistry;
 
   // ─── Debug helper ─────────────────────────────────────────────────────────
 

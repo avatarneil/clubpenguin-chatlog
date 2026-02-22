@@ -41,6 +41,14 @@ function escHtml(s) {
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+function csvEscape(val) {
+  const s = String(val);
+  if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+
 function formatTime(ts) {
   const d = new Date(ts);
   return d.toLocaleString([], { month: 'short', day: 'numeric',
@@ -100,14 +108,34 @@ function formatTime(ts) {
   document.getElementById('btn-export').addEventListener('click', async () => {
     const records = await getAll(db);
     if (!records.length) { alert('No messages to export.'); return; }
-    const lines = records.map(r => {
-      const d = new Date(r.timestamp).toLocaleString();
-      return `[${d}] [${r.room}] ${r.username}: ${r.message}`;
-    });
-    const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+
+    const format = document.getElementById('export-format').value;
+    let content, mimeType, ext;
+
+    if (format === 'json') {
+      content  = JSON.stringify(records, null, 2);
+      mimeType = 'application/json';
+      ext      = 'json';
+    } else if (format === 'csv') {
+      const header = ['timestamp', 'username', 'message', 'room', 'eventName', 'direction', 'session'];
+      const rows = records.map(r => header.map(h => csvEscape(r[h] ?? '')).join(','));
+      content  = header.join(',') + '\n' + rows.join('\n');
+      mimeType = 'text/csv';
+      ext      = 'csv';
+    } else {
+      const lines = records.map(r => {
+        const d = new Date(r.timestamp).toLocaleString();
+        return `[${d}] [${r.room}] ${r.username}: ${r.message}`;
+      });
+      content  = lines.join('\n');
+      mimeType = 'text/plain';
+      ext      = 'txt';
+    }
+
+    const blob = new Blob([content], { type: mimeType });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
-    a.href = url; a.download = `cp-chat-${new Date().toISOString().slice(0,10)}.txt`;
+    a.href = url; a.download = `cp-chat-${new Date().toISOString().slice(0,10)}.${ext}`;
     a.click();
     URL.revokeObjectURL(url);
   });

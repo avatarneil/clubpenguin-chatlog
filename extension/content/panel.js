@@ -13,6 +13,7 @@
 
   const BRIDGE_EVENT  = '__cpChatLog_message__';
   const PLAYER_EVENT  = '__cpChatLog_playerEvent__';
+  const SERVER_EVENT  = '__cpChatLog_serverEvent__';
   const DB_NAME       = 'CPChatLog';
   const DB_VERSION    = 1;
   const STORE_NAME    = 'messages';
@@ -273,6 +274,7 @@
         <button class="cpcl-tab cpcl-tab-active" data-tab="chat">\u{1F4AC} Chat</button>
         <button class="cpcl-tab" data-tab="stats">\u{1F4CA} Stats</button>
         <button class="cpcl-tab" data-tab="players">\u{1F465} Players</button>
+        <button class="cpcl-tab" data-tab="server">\u{1F310} Server (WIP)</button>
       </div>
 
       <div class="cpcl-message-list" id="cpcl-messages">
@@ -280,6 +282,7 @@
       </div>
       <div class="cpcl-stats-view" id="cpcl-stats" style="display:none"></div>
       <div class="cpcl-players-view" id="cpcl-players" style="display:none"></div>
+      <div class="cpcl-server-view" id="cpcl-server" style="display:none"></div>
 
       <div class="cpcl-replay-bar" id="cpcl-replay-bar">
         <button class="cpcl-replay-ctrl" id="cpcl-replay-play">\u25B6</button>
@@ -347,6 +350,52 @@
       <div class="cpcl-ctx-item" data-action="add-friend">Add friend</div>
       <div class="cpcl-ctx-item" data-action="remove-friend">Remove friend</div>
     `;
+
+    // ── Resize handles (top / right / corner) ──
+    const resizeTop    = document.createElement('div');
+    resizeTop.className = 'cpcl-resize-top';
+    panel.appendChild(resizeTop);
+
+    const resizeRight  = document.createElement('div');
+    resizeRight.className = 'cpcl-resize-right';
+    panel.appendChild(resizeRight);
+
+    const resizeCorner = document.createElement('div');
+    resizeCorner.className = 'cpcl-resize-corner';
+    panel.appendChild(resizeCorner);
+
+    function initResize(handle, axis) {
+      handle.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        const startX = e.clientX;
+        const startY = e.clientY;
+        const startW = panel.offsetWidth;
+        const startH = panel.offsetHeight;
+
+        function onMove(ev) {
+          if (axis === 'y' || axis === 'both') {
+            const dy = startY - ev.clientY;
+            panel.style.height = Math.max(300, Math.min(window.innerHeight * 0.9, startH + dy)) + 'px';
+          }
+          if (axis === 'x' || axis === 'both') {
+            const dx = ev.clientX - startX;
+            panel.style.width = Math.max(280, Math.min(window.innerWidth * 0.9, startW + dx)) + 'px';
+          }
+        }
+
+        function onUp() {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+        }
+
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+    }
+
+    initResize(resizeTop, 'y');
+    initResize(resizeRight, 'x');
+    initResize(resizeCorner, 'both');
 
     document.body.appendChild(toggleBtn);
     document.body.appendChild(panel);
@@ -496,9 +545,11 @@
     messageList.style.display = tab === 'chat' ? '' : 'none';
     document.getElementById('cpcl-stats').style.display = tab === 'stats' ? '' : 'none';
     document.getElementById('cpcl-players').style.display = tab === 'players' ? '' : 'none';
+    document.getElementById('cpcl-server').style.display = tab === 'server' ? '' : 'none';
 
     if (tab === 'stats') populateStats();
     if (tab === 'players') populatePlayers();
+    if (tab === 'server') populateServer();
   }
 
   // ─── Stats View ───────────────────────────────────────────────────────────
@@ -638,9 +689,11 @@
       const msgCount = p.messageCount || 0;
       const lastSeenStr = p.lastSeen ? relativeTime(p.lastSeen) : 'unknown';
 
+      const pNameStyle = isFriend ? '' : ` style="color:${usernameColor(p.username)}"`;
+
       card.innerHTML = `
         <div class="cpcl-player-info">
-          <span class="cpcl-player-name${isFriend ? ' cpcl-is-friend' : ''}">${escHtml(p.username)}</span>
+          <span class="cpcl-player-name${isFriend ? ' cpcl-is-friend' : ''}"${pNameStyle}>${escHtml(p.username)}</span>
           <span class="cpcl-player-meta">${msgCount} message${msgCount !== 1 ? 's' : ''} \u00B7 ${escHtml(lastRoom)} \u00B7 ${escHtml(lastSeenStr)}</span>
         </div>
         <button class="cpcl-player-friend${isFriend ? ' cpcl-is-friend' : ''}" title="Toggle friend">${isFriend ? '\u2605' : '\u2606'}</button>
@@ -665,6 +718,134 @@
 
     playersEl.innerHTML = '';
     playersEl.appendChild(frag);
+  }
+
+  // ─── Server View ──────────────────────────────────────────────────────────
+  // State is received via SERVER_EVENT (serialised from MAIN world).
+
+  let cachedServerState = null;
+
+  function populateServer() {
+    const serverEl = document.getElementById('cpcl-server');
+    const state    = cachedServerState;
+    const buddies  = state ? state.buddies : [];
+    const worlds   = state ? state.worlds : [];
+    const queue    = state ? state.queue : null;
+    const actionCounts = state ? state.actionCounts : {};
+    const totalActions = state ? state.totalActions : 0;
+
+    let html = '';
+
+    // ── Queue card (only when active) ──
+    if (queue && queue.active) {
+      html += `
+        <div class="cpcl-section-heading">Queue</div>
+        <div class="cpcl-queue-card">
+          <div class="cpcl-queue-position">${escHtml(String(queue.position))}</div>
+          <div class="cpcl-queue-detail">Position ${escHtml(String(queue.position))} of ${escHtml(String(queue.total))}${queue.worldName ? ' \u2014 ' + escHtml(queue.worldName) : ''}</div>
+        </div>`;
+    }
+
+    // ── Buddies ──
+    if (buddies.length > 0) {
+      const sorted = [...buddies].sort((a, b) => {
+        if (a.online && !b.online) return -1;
+        if (!a.online && b.online) return 1;
+        return (a.username || '').localeCompare(b.username || '');
+      });
+
+      const onlineCount = sorted.filter(b => b.online).length;
+      html += `<div class="cpcl-section-heading">Buddies (${onlineCount} online / ${sorted.length} total)</div>`;
+
+      for (const b of sorted) {
+        const dotClass = b.online ? 'cpcl-buddy-dot-online' : 'cpcl-buddy-dot-offline';
+        const meta = b.online
+          ? [b.world, b.room].filter(Boolean).join(' \u2014 ') || 'online'
+          : 'offline';
+        html += `
+          <div class="cpcl-buddy-card">
+            <span class="cpcl-buddy-dot ${dotClass}"></span>
+            <div class="cpcl-buddy-info">
+              <span class="cpcl-buddy-name">${escHtml(b.username)}</span>
+              <span class="cpcl-buddy-meta">${escHtml(meta)}</span>
+            </div>
+          </div>`;
+      }
+    }
+
+    // ── Worlds ──
+    if (worlds.length > 0) {
+      const sorted = [...worlds].sort((a, b) => (b.population || 0) - (a.population || 0));
+      html += `<div class="cpcl-section-heading">Worlds (${sorted.length})</div>`;
+
+      for (const w of sorted) {
+        const pop = w.population || 0;
+        const max = w.max || 300;
+        const pct = Math.min(100, Math.round((pop / max) * 100));
+        const barClass = pct >= 80 ? 'cpcl-world-bar-red' : pct >= 50 ? 'cpcl-world-bar-yellow' : 'cpcl-world-bar-green';
+        html += `
+          <div class="cpcl-world-card">
+            <div class="cpcl-world-header">
+              <span class="cpcl-world-name">${escHtml(w.name)}</span>
+              <span class="cpcl-world-pop">${pop} / ${max}</span>
+            </div>
+            <div class="cpcl-world-bar-track">
+              <div class="cpcl-world-bar-fill ${barClass}" style="width:${pct}%"></div>
+            </div>
+          </div>`;
+      }
+    }
+
+    // ── Protocol Inspector (collapsed by default) ──
+    const buddyPat = /^(get_)?budd(y|ies)|^friend|^buddy_(on|off)line|^buddy_(find|list|remove|request|accept)/i;
+    const worldPat = /^(get_)?world|^server_list|^world_(list|population)|^get_servers/i;
+    const queuePat = /^queue|^join_queue|^queue_(update|position|status)/i;
+
+    const actionNames = Object.entries(actionCounts).sort((a, b) => b[1] - a[1]);
+
+    html += `
+      <div class="cpcl-inspector-toggle" id="cpcl-inspector-toggle">
+        <span class="cpcl-inspector-arrow">\u25B6</span> Protocol Inspector (${actionNames.length} actions, ${totalActions} total)
+      </div>
+      <div class="cpcl-inspector-body" id="cpcl-inspector-body" style="display:none">`;
+
+    if (actionNames.length === 0) {
+      html += '<div class="cpcl-empty">No protocol actions seen yet. Join a game!</div>';
+    } else {
+      for (const [name, count] of actionNames) {
+        let tag = '';
+        if (buddyPat.test(name)) tag = '<span class="cpcl-inspector-tag cpcl-inspector-tag-buddy">BUDDY</span>';
+        else if (worldPat.test(name)) tag = '<span class="cpcl-inspector-tag cpcl-inspector-tag-world">WORLD</span>';
+        else if (queuePat.test(name)) tag = '<span class="cpcl-inspector-tag cpcl-inspector-tag-queue">QUEUE</span>';
+
+        html += `
+          <div class="cpcl-inspector-row">
+            <span class="cpcl-inspector-name">${escHtml(name)}</span>
+            ${tag}
+            <span class="cpcl-inspector-count">\u00D7${count}</span>
+          </div>`;
+      }
+    }
+
+    html += '</div>';
+
+    // ── Empty state ──
+    if (buddies.length === 0 && worlds.length === 0 && !(queue && queue.active)) {
+      html = '<div class="cpcl-empty">No server data yet \u2014 log in and play to see buddies, worlds & queue info.</div>' + html;
+    }
+
+    serverEl.innerHTML = html;
+
+    // Wire up inspector toggle
+    const toggleEl = document.getElementById('cpcl-inspector-toggle');
+    const bodyEl   = document.getElementById('cpcl-inspector-body');
+    if (toggleEl && bodyEl) {
+      toggleEl.addEventListener('click', () => {
+        const open = bodyEl.style.display !== 'none';
+        bodyEl.style.display = open ? 'none' : '';
+        toggleEl.querySelector('.cpcl-inspector-arrow').textContent = open ? '\u25B6' : '\u25BC';
+      });
+    }
   }
 
   // ─── Panel toggle ─────────────────────────────────────────────────────────
@@ -728,10 +909,12 @@
 
     const starChar = (msgId && bookmarks.has(msgId)) ? '\u2605' : '\u2606';
 
+    const nameStyle = isFriend ? '' : ` style="color:${usernameColor(record.username)}"`;
+
     el.innerHTML = `
       <span class="cpcl-msg-star" title="Bookmark">${starChar}</span>
       <div class="cpcl-msg-meta">
-        <span class="cpcl-msg-user">${escHtml(record.username)}</span>
+        <span class="cpcl-msg-user"${nameStyle}>${escHtml(record.username)}</span>
         <span class="cpcl-msg-room">${escHtml(record.room)}</span>
         <span class="cpcl-msg-time" title="${new Date(record.timestamp).toLocaleString()}">
           ${isToday ? formatTime(record.timestamp) : formatDate(record.timestamp)}
@@ -766,6 +949,16 @@
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
+  }
+
+  // ── Deterministic username → color via hash ──
+  function usernameColor(name) {
+    let hash = 0;
+    for (let i = 0; i < name.length; i++) {
+      hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+    }
+    const hue = ((hash % 360) + 360) % 360;
+    return `hsl(${hue}, 70%, 72%)`;
   }
 
   // ── Search matching (plain text vs regex) ──
@@ -1260,6 +1453,14 @@
     // Listen for messages from hook.js (page context -> isolated world)
     window.addEventListener(BRIDGE_EVENT, (e) => {
       ingest(e.detail);
+    });
+
+    // Listen for server events (buddy/world/queue updates)
+    // State is serialised in event detail because hook.js (MAIN world) and
+    // panel.js (ISOLATED world) have separate window objects.
+    window.addEventListener(SERVER_EVENT, (e) => {
+      if (e.detail) cachedServerState = e.detail;
+      if (activeTab === 'server') populateServer();
     });
 
     // Listen for player events (friend join notifications)

@@ -32,9 +32,10 @@
 
   // ─── Constants ────────────────────────────────────────────────────────────
 
-  const BRIDGE_EVENT = '__cpChatLog_message__';
-  const PLAYER_EVENT = '__cpChatLog_playerEvent__';
-  const IS_CPJOURNEY = /cpjourney\.net$/.test(location.hostname);
+  const BRIDGE_EVENT  = '__cpChatLog_message__';
+  const PLAYER_EVENT  = '__cpChatLog_playerEvent__';
+  const SERVER_EVENT  = '__cpChatLog_serverEvent__';
+  const IS_CPJOURNEY  = /cpjourney\.net$/.test(location.hostname);
 
   const EMOTE_NAMES = {
     1: 'Happy', 2: 'Sad', 3: 'Grumpy', 4: 'Sick', 5: 'Surprised',
@@ -138,6 +139,117 @@
     const n = Number(id);
     if (n >= 2000) return `Igloo #${n - 2000}`;
     return ROOM_NAMES[n] || `Room #${n}`;
+  }
+
+  // ─── Server-state patterns & accumulators ───────────────────────────────
+  // Broad patterns to match buddy/world/queue actions across unknown server
+  // variants. We don't know exact Yukon action names these private servers
+  // use, so we match liberally and let the Protocol Inspector surface them.
+
+  const BUDDY_PATTERNS = /^(get_)?budd(y|ies)|^friend|^buddy_(on|off)line|^buddy_(find|list|remove|request|accept)/i;
+  const WORLD_PATTERNS = /^(get_)?world|^server_list|^world_(list|population)|^get_servers/i;
+  const QUEUE_PATTERNS = /^queue|^join_queue|^queue_(update|position|status)/i;
+
+  const buddyState = new Map();  // id → { username, online, world, room }
+  const worldState = new Map();  // name → { population, max }
+  const queueState = { active: false, position: 0, total: 0, worldName: '' };
+
+  function handleBuddyAction(action, args) {
+    // Try multiple known payload shapes
+    const list = args.buddies || args.friends || args.data || args.users;
+    if (Array.isArray(list)) {
+      for (const b of list) {
+        if (!b || b.id === undefined) continue;
+        const id = Number(b.id);
+        buddyState.set(id, {
+          username: b.username || b.nickname || b.name || buddyState.get(id)?.username || `#${id}`,
+          online:   b.online !== undefined ? Boolean(b.online) : (b.status === 'online' || b.world !== undefined),
+          world:    b.world || b.server || b.worldName || null,
+          room:     b.room !== undefined ? resolveRoomName(b.room) : null,
+        });
+      }
+      return;
+    }
+    // Single buddy update (online/offline notification)
+    const id = args.id !== undefined ? Number(args.id)
+             : args.buddy_id !== undefined ? Number(args.buddy_id)
+             : args.friend_id !== undefined ? Number(args.friend_id) : null;
+    if (id === null) return;
+    const existing = buddyState.get(id) || {};
+    const isOnline = /online|find/.test(action)
+      ? true
+      : /offline|remove/.test(action) ? false : existing.online;
+    buddyState.set(id, {
+      username: args.username || args.nickname || args.name || existing.username || `#${id}`,
+      online:   isOnline,
+      world:    args.world || args.server || existing.world || null,
+      room:     args.room !== undefined ? resolveRoomName(args.room) : (existing.room || null),
+    });
+  }
+
+  function handleWorldAction(action, args) {
+    const list = args.worlds || args.servers || args.data;
+    if (Array.isArray(list)) {
+      for (const w of list) {
+        if (!w) continue;
+        const name = w.name || w.world || w.server || w.id;
+        if (!name) continue;
+        worldState.set(String(name), {
+          population: w.population ?? w.players ?? w.count ?? 0,
+          max:        w.max ?? w.max_players ?? w.capacity ?? w.limit ?? 300,
+        });
+      }
+      return;
+    }
+    // Single world update
+    const name = args.name || args.world || args.server;
+    if (name) {
+      const existing = worldState.get(String(name)) || {};
+      worldState.set(String(name), {
+        population: args.population ?? args.players ?? args.count ?? existing.population ?? 0,
+        max:        args.max ?? args.max_players ?? existing.max ?? 300,
+      });
+    }
+  }
+
+  function handleQueueAction(action, args) {
+    queueState.active    = true;
+    queueState.position  = args.position ?? args.pos ?? args.place ?? queueState.position;
+    queueState.total     = args.total ?? args.length ?? args.size ?? queueState.total;
+    queueState.worldName = args.world ?? args.server ?? args.worldName ?? queueState.worldName;
+    // If position is 0 or action implies completion, deactivate
+    if (queueState.position <= 0 || /complete|done|cancel|leave/.test(action)) {
+      queueState.active = false;
+    }
+  }
+
+  let _lastServerEventTs = 0;
+
+  function getActionCounts() {
+    const counts = {};
+    for (const ev of (window.__cpChatLog_events || [])) {
+      counts[ev.event] = (counts[ev.event] || 0) + 1;
+    }
+    return counts;
+  }
+
+  function dispatchServerEvent(category) {
+    _lastServerEventTs = Date.now();
+    // Serialize Maps → arrays so data crosses the MAIN/ISOLATED world boundary
+    const buddyArr = [];
+    buddyState.forEach((v, k) => buddyArr.push({ id: k, ...v }));
+    const worldArr = [];
+    worldState.forEach((v, k) => worldArr.push({ name: k, ...v }));
+
+    window.dispatchEvent(new CustomEvent(SERVER_EVENT, { detail: {
+      category,
+      ts: _lastServerEventTs,
+      buddies:      buddyArr,
+      worlds:       worldArr,
+      queue:        { ...queueState },
+      actionCounts: getActionCounts(),
+      totalActions: (window.__cpChatLog_events || []).length,
+    }}));
   }
 
   // ─── Debug buffers (initialised early so WS layer can write to them) ──────
@@ -344,6 +456,21 @@
           }}));
         }
       }
+    }
+
+    // ── Server-state pattern matching (buddy/world/queue) ──
+    if (BUDDY_PATTERNS.test(action)) {
+      try { handleBuddyAction(action, args); } catch { /* defensive */ }
+      dispatchServerEvent('buddy');
+    } else if (WORLD_PATTERNS.test(action)) {
+      try { handleWorldAction(action, args); } catch { /* defensive */ }
+      dispatchServerEvent('world');
+    } else if (QUEUE_PATTERNS.test(action)) {
+      try { handleQueueAction(action, args); } catch { /* defensive */ }
+      dispatchServerEvent('queue');
+    } else if (Date.now() - _lastServerEventTs > 5000) {
+      // Throttled heartbeat so Protocol Inspector stays fresh
+      dispatchServerEvent('heartbeat');
     }
 
     if (!CHAT_ACTIONS.has(action)) return;
@@ -853,11 +980,14 @@
 
   // ─── Expose data for panel.js ────────────────────────────────────────────
 
-  window.__cpChatLog_friends       = friendList;
-  window.__cpChatLog_ignored       = ignoreList;
-  window.__cpChatLog_saveFriends   = () => saveSet(STORAGE_KEY_FRIENDS, friendList);
-  window.__cpChatLog_saveIgnored   = () => saveSet(STORAGE_KEY_IGNORED, ignoreList);
+  window.__cpChatLog_friends        = friendList;
+  window.__cpChatLog_ignored        = ignoreList;
+  window.__cpChatLog_saveFriends    = () => saveSet(STORAGE_KEY_FRIENDS, friendList);
+  window.__cpChatLog_saveIgnored    = () => saveSet(STORAGE_KEY_IGNORED, ignoreList);
   window.__cpChatLog_playerRegistry = playerRegistry;
+  window.__cpChatLog_buddyState     = buddyState;
+  window.__cpChatLog_worldState     = worldState;
+  window.__cpChatLog_queueState     = queueState;
 
   // ─── Debug helper ─────────────────────────────────────────────────────────
 
